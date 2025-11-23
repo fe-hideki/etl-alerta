@@ -11,6 +11,36 @@ import static sptech.school.IntegracaoJira.abrirChamado;
 
 public class ConexaoBd {
 
+
+    // ==========================================
+    // MÉTODO MAIN APENAS PARA TESTE DE CONEXÃO
+    // ==========================================
+    public static void main(String[] args) {
+        System.out.println("--- Testando Conexão com Banco de Dados ---");
+
+        try (Connection conn = getConnection()) {
+            System.out.println("✅ Conexão estabelecida com sucesso!");
+
+            // Teste de busca de limites (Troque pelo MAC de um mainframe que existe no seu banco)
+            String macTeste = "166250251803552"; // Exemplo do seu script (Z15)
+            System.out.println("Buscando métricas para o MAC: " + macTeste);
+
+            Map<String, Double[]> limites = buscarLimitesMetricas(conn, macTeste);
+
+            if (limites.isEmpty()) {
+                System.out.println("⚠️ Nenhuma métrica encontrada. Verifique se o MAC está correto e se há métricas 'Uso' cadastradas.");
+            } else {
+                for (Map.Entry<String, Double[]> entry : limites.entrySet()) {
+                    System.out.printf("   Componente: %s | Min: %.2f | Max: %.2f%n",
+                            entry.getKey(), entry.getValue()[0], entry.getValue()[1]);
+                }
+            }
+
+        } catch (SQLException e) {
+            System.err.println("❌ Falha na conexão: " + e.getMessage());
+        }
+    }
+
     // Mapeamento de Gravidade conforme seus INSERTS (Tabela gravidade)
     private static final Map<String, Integer> MAP_GRAVIDADE_FK = new HashMap<>();
     static {

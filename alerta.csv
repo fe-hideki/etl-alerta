@@ -37,5 +37,3 @@ dt_hora;valor_coletado_%;componente;gravidade;macAdress;identificacao_mainframe
 2025-11-22 11:20:00;95,29;Processador;Muito Urgente;166250251803552;Hideo
 2025-11-22 11:35:00;0,00;Processador;Emergencia;166250251803552;Hideo
 2025-11-22 12:55:00;91,60;Memória RAM;Urgente;166250251803552;Hideo
-2025-11-23 10:01:00;90,50;Processador;Urgente;166250251803552;MF-B2-F1
-2025-11-23 10:03:00;105,20;Memória RAM;Emergencia;166250251803552;MF-C1-G7
