@@ -1,0 +1,41 @@
+### IntelliJ IDEA ###
+out/
+!**/src/main/**/out/
+!**/src/test/**/out/
+
+### Eclipse ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+bin/
+!**/src/main/**/bin/
+!**/src/test/**/bin/
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+### VS Code ###
+.vscode/
+
+### Mac OS ###
+.DS_Store
+
+# Diretórios de compilação do Maven/IntelliJ
+target/
+
+# Arquivos de credenciais/segredos
+.env
+src/main/resources/.env
+
+# Outros arquivos temporários ou de IDE
+*.log
+*.iml
+.idea/
