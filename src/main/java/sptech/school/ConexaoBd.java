@@ -1,43 +1,50 @@
 package sptech.school;
 
 import io.github.cdimascio.dotenv.Dotenv;
-import org.jetbrains.annotations.NotNull;
 import java.io.IOException;
 import java.sql.*;
 import java.util.HashMap;
 import java.util.Map;
 
-// Importação da integração Jira, que será usada no método de inserção
+// Importação da integração Jira
 import static sptech.school.IntegracaoJira.abrirChamado;
 
 public class ConexaoBd {
 
-    // Método auxiliar para estabelecer a conexão
+    // Mapeamento de Gravidade conforme seus INSERTS (Tabela gravidade)
+    private static final Map<String, Integer> MAP_GRAVIDADE_FK = new HashMap<>();
+    static {
+        // 1=Emergência, 2=Muito Urgente, 3=Urgente, 4=Normal
+        MAP_GRAVIDADE_FK.put("Emergencia", 1);
+        MAP_GRAVIDADE_FK.put("Emergência", 1); // Caso venha com acento
+        MAP_GRAVIDADE_FK.put("Muito Urgente", 2);
+        MAP_GRAVIDADE_FK.put("Urgente", 3);
+        MAP_GRAVIDADE_FK.put("Normal", 4);
+    }
+
     public static Connection getConnection() throws SQLException {
         Dotenv dotenv = Dotenv.load();
         String url = dotenv.get("DB_URL");
         String user = dotenv.get("DB_USER");
         String password = dotenv.get("DB_PASSWORD");
-        // O GeradorAlertas fará o try-with-resources para fechar a conexão
         return DriverManager.getConnection(url, user, password);
     }
 
     /**
-     * Busca os limites MIN e MAX da tabela metrica.
-     * @param conn Conexão JDBC aberta.
-     * @param macAdress Mac Adress do mainframe.
-     * @return Map onde a chave é o nome do componente e o valor é um array Double[] {min, max}.
+     * Busca os limites MIN e MAX configurados na tabela metrica.
+     * Retorna um Map onde a Chave é o nome do componente (ex: 'Processador')
+     * e o Valor é um array [min, max].
      */
     public static Map<String, Double[]> buscarLimitesMetricas(Connection conn, String macAdress) throws SQLException {
-
-        // Assume fkTipo=1 para "Uso" (CPU, RAM, DISCO)
+        // SQL ajustado para suas tabelas: metrica -> componente -> mainframe
         String sql = """
-        SELECT c.nome, m.min, m.max
-        FROM metrica m
-        JOIN componente c ON m.fkComponente = c.id
-        JOIN mainframe mf ON m.fkMainframe = mf.id
-        WHERE mf.macAdress = ? AND m.fkTipo = 1; 
+            SELECT c.nome, m.min, m.max
+            FROM metrica m
+            JOIN componente c ON m.fkComponente = c.id
+            JOIN mainframe mf ON m.fkMainframe = mf.id
+            WHERE mf.macAdress = ? AND m.fkTipo = 1
         """;
+        // Obs: fkTipo = 1 refere-se a 'Uso' conforme seu script
 
         Map<String, Double[]> limites = new HashMap<>();
 
@@ -48,6 +55,7 @@ public class ConexaoBd {
                     String nomeComponente = rs.getString("nome");
                     Double min = rs.getDouble("min");
                     Double max = rs.getDouble("max");
+
                     limites.put(nomeComponente, new Double[]{min, max});
                 }
             }
@@ -56,66 +64,76 @@ public class ConexaoBd {
     }
 
     /**
-     * Insere o alerta no banco de dados (tabela 'alerta') e abre chamado no Jira.
+     * Insere o alerta na tabela 'alerta' descobrindo o fkMetrica dinamicamente.
      */
-    public static void inserirAlerta(@NotNull Connection conn,
+    public static void inserirAlerta(Connection conn,
                                      String dtHora, String nomeComponente, Double valorColetado,
                                      String macAdress, String identificacaoMainframe, String gravidade) {
 
-        // 1. Mapeamento de Gravidade (String para ID do BD)
-        int fkGravidade;
-        switch (gravidade.toLowerCase()) {
-            case "emergência": fkGravidade = 1; break;
-            case "muito urgente": fkGravidade = 2; break;
-            case "urgente": fkGravidade = 3; break;
-            default: fkGravidade = 4; // Normal, mas não deve ser inserido aqui
-        }
+        // 1. Descobrir o ID da gravidade
+        // Remove acentos e ajusta casing se necessário para garantir o match
+        String gravidadeChave = gravidade;
+        if(gravidade.equalsIgnoreCase("Emergência")) gravidadeChave = "Emergencia";
 
-        // Se a gravidade for 'Normal', não insere no DB nem abre chamado
+        Integer fkGravidade = MAP_GRAVIDADE_FK.getOrDefault(gravidadeChave, 4); // Default 4 (Normal)
+
+        // Se for Normal (4), a lógica de negócio geralmente não insere alerta ou insere apenas log
         if (fkGravidade == 4) return;
 
-        // SQL para inserir o alerta no DB:
+        // 2. SQL de Inserção
+        // Precisamos sub-selecionar o ID da métrica baseado no MacAdress e Nome do Componente
         String sql = """
-            INSERT INTO alerta (dt_hora, valor_coletado, fkGravidade, fkMetrica)
-            VALUES (?, ?, ?, (
-                SELECT m.id FROM metrica m
+            INSERT INTO alerta (dt_hora, valor_coletado, fkGravidade, fkStatus, fkMetrica)
+            VALUES (?, ?, ?, 1, (
+                SELECT m.id 
+                FROM metrica m
                 JOIN mainframe mf ON m.fkMainframe = mf.id
                 JOIN componente c ON m.fkComponente = c.id
-                WHERE mf.macAdress = ? AND c.nome = ?
-            )); 
+                WHERE mf.macAdress = ? AND c.nome = ? AND m.fkTipo = 1
+                LIMIT 1
+            ));
         """;
+        // Obs: fkStatus 1 = 'Aberto' conforme seu insert de exemplo
 
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-            // Seta os valores
-            stmt.setString(1, dtHora.replace("T", " ")); // Formato TIMESTAMP/DATETIME
+            // Formatar Data: O Java String vem como ISO, o MySQL DATETIME aceita "YYYY-MM-DD HH:MM:SS"
+            // Se o dtHora vier com "T" (ex: 2023-10-25T10:00:00), substituímos por espaço.
+            stmt.setString(1, dtHora.replace("T", " "));
             stmt.setDouble(2, valorColetado);
             stmt.setInt(3, fkGravidade);
-            stmt.setString(4, macAdress); // Para o subquery
-            stmt.setString(5, nomeComponente); // Para o subquery
+            stmt.setString(4, macAdress);
 
-            // Executa
-            stmt.executeUpdate();
-            System.out.printf("Alerta %s inserido para %s (%s) | Valor: %.2f\n",
-                    gravidade, nomeComponente, identificacaoMainframe, valorColetado);
+            // ATENÇÃO: O nome do componente deve ser igual ao do banco ('Processador', 'Memória RAM', 'Disco Rígido')
+            // Se o seu CSV traz "CPU", precisa converter para "Processador" antes de mandar pra cá ou garantir que o CSV venha certo.
+            stmt.setString(5, nomeComponente);
 
-            // 2. Abertura de Chamado no Jira (Apenas para alertas críticos)
-            if (fkGravidade <= 3) { // Emergência, Muito Urgente, Urgente
-                String summary = String.format("ALERTA %s: Uso de %s no %s", gravidade.toUpperCase(), nomeComponente, identificacaoMainframe);
-                String description = String.format(
-                        "O Mainframe %s (MAC: %s) excedeu o limite de uso de %s.\n" +
-                                "Valor Coletado: %.2f%%\n" +
-                                "Data/Hora: %s\n" +
-                                "Gravidade: %s",
-                        identificacaoMainframe, macAdress, nomeComponente, valorColetado, dtHora, gravidade
-                );
-                abrirChamado(summary, description);
+            int linhasAfetadas = stmt.executeUpdate();
+
+            if (linhasAfetadas > 0) {
+                System.out.printf("✅ Alerta %s inserido no BD para %s | Componente: %s | Valor: %.2f%%%n",
+                        gravidade, identificacaoMainframe, nomeComponente, valorColetado);
+
+                // 3. Integração com Jira (Somente se for crítico)
+                if (fkGravidade <= 3) {
+                    String summary = String.format("ALERTA %s: %s em %s", gravidade.toUpperCase(), nomeComponente, identificacaoMainframe);
+                    String description = String.format(
+                            "O Mainframe %s (MAC: %s) apresentou comportamento anômalo.\n" +
+                                    "Componente: %s\n" +
+                                    "Valor Coletado: %.2f%%\n" +
+                                    "Gravidade: %s\n" +
+                                    "Data/Hora: %s",
+                            identificacaoMainframe, macAdress, nomeComponente, valorColetado, gravidade, dtHora
+                    );
+                    abrirChamado(summary, description);
+                }
+            } else {
+                System.err.println("⚠️ Alerta não inserido. Verifique se o MAC Address e o Componente existem na tabela 'metrica'.");
             }
 
         } catch (SQLException e) {
-            System.err.println("Erro ao inserir alerta no DB: " + e.getMessage());
-            e.printStackTrace();
+            System.err.println("❌ Erro SQL ao inserir alerta: " + e.getMessage());
         } catch (IOException e) {
-            System.err.println("Erro ao abrir chamado no Jira: " + e.getMessage());
+            System.err.println("❌ Erro ao abrir chamado no Jira: " + e.getMessage());
         }
     }
 }

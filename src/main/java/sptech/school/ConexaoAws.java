@@ -21,7 +21,11 @@ public class ConexaoAws {
     private static final List<String> BUCKETS_TRUSTED = new ArrayList<>();
     private static final List<String> BUCKETS_CLIENT = new ArrayList<>();
 
-    //Lê um CSV do bucket RAW e devolve como lista de linhas
+    // =========================================================================
+    // MÉTODOS DE LEITURA (GET)
+    // =========================================================================
+
+    // Lê um CSV do bucket RAW e devolve como lista de linhas
     public static List<String[]> lerArquivoCsvDoRaw(String nomeArquivo) {
         List<String[]> linhas = new ArrayList<>();
         String bucketRaw = pegarBucket("raw");
@@ -34,26 +38,36 @@ public class ConexaoAws {
 
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(s3.getObject(getReq)))) {
-
                 String linha;
+                boolean primeiraLinha = true;
                 while ((linha = reader.readLine()) != null) {
+                    if (primeiraLinha) {
+                        primeiraLinha = false; // Pula o cabeçalho
+                        continue;
+                    }
+                    // Utiliza o delimitador ponto-e-vírgula (;)
                     linhas.add(linha.split(";"));
                 }
             }
 
-            System.out.println("Arquivo lido do RAW: " + nomeArquivo);
-
-        } catch (Exception e) {
-            System.err.println("Erro ao ler arquivo do RAW: " + e.getMessage());
+        } catch (S3Exception e) {
+            if (e.statusCode() == 404) {
+                System.out.printf("Arquivo %s não encontrado no bucket RAW %s.%n", nomeArquivo, bucketRaw);
+                return null;
+            }
+            System.err.println("Erro ao ler arquivo do S3 RAW: " + e.awsErrorDetails().errorMessage());
+        } catch (IOException e) {
+            System.err.println("Erro de I/O ao processar CSV do S3 RAW: " + e.getMessage());
         }
 
         return linhas;
     }
 
-// Lê um CSV do bucket TRUSTED e devolve como lista de linhas
+    // Lê um CSV do bucket TRUSTED e devolve como lista de linhas
+    // NOVO MÉTODO: Lê um CSV do bucket TRUSTED e devolve como lista de linhas
     public static List<String[]> lerArquivoCsvDoTrusted(String nomeArquivo) {
         List<String[]> linhas = new ArrayList<>();
-        String bucketTrusted = pegarBucket("trusted"); // Usa a constante TRUSTED
+        String bucketTrusted = pegarBucket("trusted");
 
         try {
             GetObjectRequest getReq = GetObjectRequest.builder()
@@ -63,42 +77,55 @@ public class ConexaoAws {
 
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(s3.getObject(getReq)))) {
+
                 String linha;
+                // Pular o cabeçalho (a primeira linha)
+                reader.readLine();
+
                 while ((linha = reader.readLine()) != null) {
-                    // Divide por ";"
+                    // Utiliza o delimitador ponto-e-vírgula (;)
                     linhas.add(linha.split(";"));
                 }
             }
         } catch (S3Exception e) {
-            System.err.println("Erro ao ler arquivo do S3 (" + nomeArquivo + "): " + e.awsErrorDetails().errorMessage());
+            System.err.println("Erro S3 ao ler arquivo: " + nomeArquivo + " do bucket " + bucketTrusted);
+            System.err.println(e.awsErrorDetails().errorMessage());
+            return null; // Retorna null em caso de erro S3
         } catch (IOException e) {
-            System.err.println("Erro de I/O ao processar arquivo: " + e.getMessage());
+            System.err.println("Erro de IO ao ler arquivo CSV: " + e.getMessage());
+            return null;
         }
+
+        System.out.println("✅ Arquivo " + nomeArquivo + " lido do bucket TRUSTED.");
         return linhas;
     }
 
-    //Envia CSV tratado para o bucket TRUSTED
-    public static void enviarCsvTrusted(String nomeArquivo, String conteudoCsv) {
+    // =========================================================================
+    // MÉTODOS DE ESCRITA (PUT)
+    // =========================================================================
+
+    // Envia um CSV para o bucket TRUSTED
+    public static void enviarCsvTrusted(String nomeArquivo, String conteudo) {
         String bucketTrusted = pegarBucket("trusted");
 
         try {
             PutObjectRequest putReq = PutObjectRequest.builder()
                     .bucket(bucketTrusted)
                     .key(nomeArquivo)
+                    .contentType("text/csv")
                     .build();
 
-            s3.putObject(putReq, RequestBody.fromString(conteudoCsv));
-            System.out.println("✅ CSV tratado enviado para TRUSTED: " + nomeArquivo);
+            s3.putObject(putReq, RequestBody.fromString(conteudo));
+            System.out.printf("✅ Arquivo '%s' enviado com sucesso para o bucket TRUSTED: %s%n", nomeArquivo, bucketTrusted);
 
-        } catch (Exception e) {
-            System.err.println("Erro ao enviar CSV para TRUSTED: " + e.getMessage());
+        } catch (S3Exception e) {
+            System.err.println("❌ Erro ao enviar arquivo para o S3 TRUSTED: " + e.awsErrorDetails().errorMessage());
         }
     }
 
-    // Em ConexaoAws.java
-// Envia o CSV tratado para o bucket CLIENT
-    public static void enviarCsvClient(String nomeArquivo, String conteudoCsv) {
-        String bucketClient = pegarBucket("client"); // Usa a constante CLIENT
+    // Envia um CSV para o bucket CLIENT
+    public static void enviarCsvClient(String nomeArquivo, String conteudo) {
+        String bucketClient = pegarBucket("client");
 
         try {
             PutObjectRequest putReq = PutObjectRequest.builder()
@@ -107,25 +134,31 @@ public class ConexaoAws {
                     .contentType("text/csv")
                     .build();
 
-            s3.putObject(putReq, RequestBody.fromString(conteudoCsv));
-            System.out.println("Arquivo CSV de alertas enviado com sucesso para o bucket CLIENT: " + bucketClient + "/" + nomeArquivo);
+            s3.putObject(putReq, RequestBody.fromString(conteudo));
+            System.out.printf("✅ Arquivo '%s' enviado com sucesso para o bucket CLIENT: %s%n", nomeArquivo, bucketClient);
+
         } catch (S3Exception e) {
-            System.err.println("Erro ao enviar arquivo para o S3: " + e.awsErrorDetails().errorMessage());
+            System.err.println("❌ Erro ao enviar arquivo para o S3 CLIENT: " + e.awsErrorDetails().errorMessage());
         }
     }
 
-    //Acha o bucket certo pelo nome (raw/trusted/client)
-    private static String pegarBucket(String tipo) {
-        ListBucketsResponse response = s3.listBuckets();
-        for (Bucket b : response.buckets()) {
-            if (b.name().toLowerCase().contains(tipo)) {
-                return b.name();
-            }
+    // =========================================================================
+    // MÉTODOS DE SUPORTE
+    // =========================================================================
+
+    // Retorna o nome do bucket pelo tipo
+    public static String pegarBucket(String tipo) {
+        if (tipo.equalsIgnoreCase("raw") && !BUCKETS_RAW.isEmpty()) {
+            return BUCKETS_RAW.get(0);
+        } else if (tipo.equalsIgnoreCase("trusted") && !BUCKETS_TRUSTED.isEmpty()) {
+            return BUCKETS_TRUSTED.get(0);
+        } else if (tipo.equalsIgnoreCase("client") && !BUCKETS_CLIENT.isEmpty()) {
+            return BUCKETS_CLIENT.get(0);
         }
         throw new RuntimeException("Bucket do tipo '" + tipo + "' não encontrado!");
     }
 
-    //Lista todos os buckets da conta
+    // Lista todos os buckets da conta
     public static List<String> pegarBucketsS3() {
         List<String> buckets = new ArrayList<>();
         try {
@@ -139,7 +172,7 @@ public class ConexaoAws {
         return buckets;
     }
 
-    //Testa conexão e categoriza buckets
+    // Testa conexão e categoriza buckets
     public static void main(String[] args) {
         try {
             System.out.println("Conectando à AWS S3...");
@@ -156,8 +189,15 @@ public class ConexaoAws {
             System.out.println("Buckets TRUSTED: " + BUCKETS_TRUSTED);
             System.out.println("Buckets CLIENT: " + BUCKETS_CLIENT);
 
+            if (BUCKETS_RAW.isEmpty() || BUCKETS_TRUSTED.isEmpty() || BUCKETS_CLIENT.isEmpty()) {
+                System.err.println("\nERRO: Certifique-se de ter pelo menos um bucket para cada tipo (raw, trusted, client).");
+            } else {
+                System.out.println("\nConexão e categorização de buckets concluídas com sucesso.");
+            }
+
         } catch (Exception e) {
-            System.err.println("Erro ao conectar ou listar buckets: " + e.getMessage());
+            System.err.println("Erro geral no main de ConexaoAws: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 }

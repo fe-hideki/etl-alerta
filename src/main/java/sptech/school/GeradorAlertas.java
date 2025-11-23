@@ -1,17 +1,27 @@
 package sptech.school;
 
 import io.github.cdimascio.dotenv.Dotenv;
+import java.io.BufferedReader;
+import java.io.FileReader;
 import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.HashMap;
 
 public class GeradorAlertas {
 
-    // Constante para o valor máximo (100% de uso)
     private static final Double LIMITE_MAXIMO_ALERTA = 100.0;
+
+    // Constantes de índices do CSV
+    private static final int INDICE_MAC_ADRESS = 0;
+    private static final int INDICE_DT_HORA = 1;
+    private static final int INDICE_ID_MAINFRAME = 2;
+    private static final int INDICE_CPU = 3;
+    private static final int INDICE_RAM = 4;
+    private static final int INDICE_DISCO = 5;
 
     // =========================================================================
     // 1. FUNÇÃO PRINCIPAL
@@ -23,142 +33,174 @@ public class GeradorAlertas {
         List<String[]> dadosMainframe = null;
         List<Alerta> listaAlertas = new ArrayList<>();
 
-        if (!modoExecucao.equalsIgnoreCase("AWS")) {
-            System.err.println("Modo LOCAL de execução não suportado para este fluxo. Configure MODO_EXECUCAO=AWS.");
+        // 1. EXTRAÇÃO
+        if (modoExecucao.equalsIgnoreCase("AWS")) {
+            System.out.println("Lendo arquivo de dados do bucket TRUSTED...");
+            dadosMainframe = ConexaoAws.lerArquivoCsvDoTrusted("trusted.csv");
+        } else if (modoExecucao.equalsIgnoreCase("SIMULADO")) {
+            try {
+                System.out.println("Lendo arquivo de dados localmente (trusted.csv)...");
+                dadosMainframe = lerArquivoCsvLocal("trusted.csv");
+            } catch (IOException e) {
+                System.err.println("❌ Erro ao ler arquivo local trusted.csv: " + e.getMessage());
+                return "";
+            }
+        } else {
+            System.err.println("❌ MODO_EXECUCAO inválido. Use 'AWS' ou 'SIMULADO'.");
             return "";
         }
-
-        System.out.println("Lendo arquivo de dados do bucket TRUSTED...");
-        // Extração: Lê o CSV do S3 TRUSTED
-        dadosMainframe = ConexaoAws.lerArquivoCsvDoTrusted("trusted.csv");
 
         if (dadosMainframe == null || dadosMainframe.isEmpty()) {
-            System.out.println("Nenhum dado encontrado no bucket TRUSTED.");
+            System.out.println("Nenhum dado encontrado ou lido.");
             return "";
         }
 
-        // Conexão com o Banco de Dados para buscar limites e inserir alertas
+        // 2. CONEXÃO DB E PROCESSAMENTO
         try (Connection conn = ConexaoBd.getConnection()) {
 
+            // Agrupa linhas por mainframe para otimizar buscas no banco
+            Map<String, List<String[]>> dadosPorMainframe = new HashMap<>();
             for (String[] linha : dadosMainframe) {
-                // Assumindo a ordem das colunas no trusted.csv:
-                String macAdress = linha[0];
-                String dtHora = linha[1];
-                String identificacaoMainframe = linha[2];
+                // Validação básica de tamanho da linha
+                if (linha.length > INDICE_MAC_ADRESS) {
+                    String macAdress = linha[INDICE_MAC_ADRESS];
+                    dadosPorMainframe.computeIfAbsent(macAdress, k -> new ArrayList<>()).add(linha);
+                }
+            }
 
-                // Busca os limites min/max do DB para o mainframe
-                Map<String, Double[]> limites = ConexaoBd.buscarLimitesMetricas(conn, macAdress);
+            for (Map.Entry<String, List<String[]>> entry : dadosPorMainframe.entrySet()) {
+                String macAdress = entry.getKey();
+                List<String[]> linhas = entry.getValue();
 
-                if (limites.isEmpty()) {
-                    System.out.println("Aviso: Limites de métricas não encontrados no DB para MAC: " + macAdress);
-                    continue;
+                // Busca limites UMA VEZ por mainframe (retorna chaves como: "Processador", "Memória RAM")
+                Map<String, Double[]> limitesMainframe = ConexaoBd.buscarLimitesMetricas(conn, macAdress);
+
+                if (limitesMainframe.isEmpty()) {
+                    System.out.println("⚠️ Limites não encontrados no DB para o MAC: " + macAdress);
+                    continue; // Pula se não achou mainframe no banco
                 }
 
-                // Indices no CSV TRUSTED: [3]=CPU, [4]=RAM, [5]=DISCO
-
-                // Processa Processador
-                processarComponente(conn, listaAlertas, dtHora, macAdress, identificacaoMainframe,
-                        "Processador", 3, linha, limites);
-
-                // Processa Memória RAM
-                processarComponente(conn, listaAlertas, dtHora, macAdress, identificacaoMainframe,
-                        "Memória RAM", 4, linha, limites);
-
-                // Processa Disco Rígido
-                processarComponente(conn, listaAlertas, dtHora, macAdress, identificacaoMainframe,
-                        "Disco Rígido", 5, linha, limites);
+                for (String[] linha : linhas) {
+                    processarLinhaMainframe(conn, listaAlertas, linha, limitesMainframe);
+                }
             }
 
         } catch (SQLException e) {
-            System.err.println("Erro ao conectar ou buscar/inserir métricas no banco de dados: " + e.getMessage());
+            System.err.println("❌ Erro de SQL: " + e.getMessage());
             e.printStackTrace();
-            return "";
-        } catch (Exception e) {
-            System.err.println("Erro durante o processamento de alertas: " + e.getMessage());
-            e.printStackTrace();
-            return "";
         }
 
-        // Carga: Monta o CSV dos alertas gerados para o bucket CLIENT
+        // 3. CARGA
         return montarCsvAlertas(listaAlertas);
     }
 
     // =========================================================================
-    // 2. MÉTODOS AUXILIARES DE TRANSFORMAÇÃO
+    // 2. MÉTODOS AUXILIARES DE TRATAMENTO
     // =========================================================================
 
-    // Orquestra a busca do limite, conversão e chamada da verificação de alerta
-    private static void processarComponente(Connection conn, List<Alerta> listaAlertas, String dtHora, String macAdress,
-                                            String identificacaoMainframe, String nomeComponente,
-                                            int indiceLinha, String[] linha, Map<String, Double[]> limites) {
+    private static void processarLinhaMainframe(Connection conn, List<Alerta> listaAlertas, String[] linha,
+                                                Map<String, Double[]> limitesMainframe) {
 
-        Double[] limite = limites.get(nomeComponente);
+        if (linha.length < INDICE_DISCO + 1) return;
 
-        if (limite != null) {
-            // Conversão de String (CSV) para Double, tratando possível vírgula
-            Double valorColetado = Double.parseDouble(linha[indiceLinha].replace(",", "."));
+        String dtHora = linha[INDICE_DT_HORA];
+        String macAdress = linha[INDICE_MAC_ADRESS];
+        String identificacaoMainframe = linha[INDICE_ID_MAINFRAME];
 
-            // Verifica, insere no DB/Jira E adiciona à lista para o CSV
-            verificarAlerta(conn, listaAlertas, dtHora, macAdress, identificacaoMainframe,
-                    nomeComponente, valorColetado, limite[0], limite[1]);
+        // Mapeamento: Chave do CSV -> Objeto contendo {Nome no Banco, Índice no CSV}
+        // Isso resolve o problema de "CPU" (CSV) vs "Processador" (Banco)
+        Map<String, Integer> mapaIndices = new HashMap<>();
+        mapaIndices.put("Processador", INDICE_CPU);
+        mapaIndices.put("Memória RAM", INDICE_RAM);
+        mapaIndices.put("Disco Rígido", INDICE_DISCO);
+
+        // Itera sobre os componentes esperados (Processador, RAM, Disco)
+        for (Map.Entry<String, Integer> entry : mapaIndices.entrySet()) {
+            String nomeComponenteBd = entry.getKey(); // Ex: "Processador"
+            int indiceCsv = entry.getValue();         // Ex: 3
+
+            // Verifica se o banco retornou limites para esse componente ("Processador")
+            if (limitesMainframe.containsKey(nomeComponenteBd)) {
+
+                Double limiteMin = limitesMainframe.get(nomeComponenteBd)[0];
+                Double limiteMax = limitesMainframe.get(nomeComponenteBd)[1];
+
+                try {
+                    Double valorColetado = Double.parseDouble(linha[indiceCsv].replace(",", "."));
+                    String gravidade = definirGravidade(valorColetado, limiteMin, limiteMax);
+
+                    // Se gravidade for crítica, insere no banco e adiciona na lista
+                    if (gravidade != null && !gravidade.equals("Normal")) {
+                        // DB e Jira (Envia o nome correto: "Processador")
+                        ConexaoBd.inserirAlerta(conn, dtHora, nomeComponenteBd, valorColetado, macAdress, identificacaoMainframe, gravidade);
+
+                        // CSV Client
+                        listaAlertas.add(new Alerta(dtHora, valorColetado, nomeComponenteBd, gravidade, macAdress, identificacaoMainframe));
+                    }
+
+                } catch (NumberFormatException e) {
+                    System.err.println("Erro ao converter valor numérico na linha: " + String.join(";", linha));
+                }
+            }
         }
     }
 
-    // Aplica a lógica de gravidade (replica o TRIGGER SQL) e dispara a inserção/Jira
-    private static void verificarAlerta(Connection conn, List<Alerta> listaAlertas, String dtHora, String macAdress, String identificacaoMainframe,
-                                        String componente, Double valorColetado, Double limiteMin, Double limiteMax) {
+    // Lógica separada para ficar igual ao seu Trigger SQL
+    private static String definirGravidade(Double valor, Double min, Double max) {
+        // Cálculo dos pontos médios (Range Crítico)
+        // Ex: Se Max é 90 e Limite é 100. Ponto médio é 95.
+        Double limiteMuitoUrgenteMax = max + ((LIMITE_MAXIMO_ALERTA - max) / 2);
 
-        String gravidade = null;
+        // Ex: Se Min é 10 e Limite é 0. Ponto médio é 5.
+        Double limiteMuitoUrgenteMin = min / 2;
 
-        // Limiares de Alerta (Baseado na lógica de 0% e 100%)
-        Double limiteMuitoUrgenteMax = limiteMax + ((LIMITE_MAXIMO_ALERTA - limiteMax) / 2); // Ponto médio entre Max e 100
-        Double limiteMuitoUrgenteMin = limiteMin / 2; // Ponto médio entre Min e 0
-
-        // 1. EMERGÊNCIA (fkGravidade = 1) - Extremos 100% ou 0%
-        if (valorColetado >= LIMITE_MAXIMO_ALERTA || valorColetado <= 0.00) {
-            gravidade = "Emergência";
-
-            // 2. MUITO URGENTE (fkGravidade = 2) - Entre o limiteMuitoUrgente e o extremo
-        } else if ((valorColetado > limiteMuitoUrgenteMax && valorColetado < LIMITE_MAXIMO_ALERTA)
-                || (valorColetado > 0.00 && valorColetado <= limiteMuitoUrgenteMin)) {
-            gravidade = "Muito Urgente";
-
-            // 3. URGENTE (fkGravidade = 3) - Entre o VMAX/VMIN e o limiteMuitoUrgente
-        } else if ((valorColetado > limiteMax && valorColetado <= limiteMuitoUrgenteMax) // Acima do Max
-                || (valorColetado >= limiteMuitoUrgenteMin && valorColetado < limiteMin)) { // Abaixo do Min
-            gravidade = "Urgente";
-
-            // 4. NORMAL (fkGravidade = 4) - Dentro do range VMIN e VMAX
-        } else if (valorColetado > limiteMin && valorColetado < limiteMax) {
-            gravidade = "Normal";
+        // 1. EMERGÊNCIA (100% ou 0%)
+        if (valor >= LIMITE_MAXIMO_ALERTA || valor <= 0.00) {
+            return "Emergencia"; // Sem acento para facilitar Enum/Map no Java
         }
 
-        // Se a gravidade for crítica (diferente de "Normal" ou nula)
-        if (gravidade != null && !gravidade.equals("Normal")) {
-
-            // 1. INSERE NO DB E ABRE CHAMADO NO JIRA
-            ConexaoBd.inserirAlerta(conn, dtHora, componente, valorColetado, macAdress, identificacaoMainframe, gravidade);
-
-            // 2. ADICIONA À LISTA PARA O CSV (Bucket CLIENT)
-            listaAlertas.add(new Alerta(dtHora, valorColetado, componente, gravidade, macAdress, identificacaoMainframe));
+        // 2. MUITO URGENTE (Entre o ponto médio e o extremo)
+        // Ex: Entre 95 e 100 OU entre 0 e 5
+        else if (valor >= limiteMuitoUrgenteMax || valor <= limiteMuitoUrgenteMin) {
+            return "Muito Urgente";
         }
+
+        // 3. URGENTE (Passou do limite configurado, mas não chegou no ponto médio)
+        // Ex: Entre 90 e 95 OU entre 5 e 10
+        else if (valor > max || valor < min) {
+            return "Urgente";
+        }
+
+        // 4. NORMAL (Dentro da faixa segura)
+        return "Normal";
     }
 
     // =========================================================================
-    // 3. MÉTODO AUXILIAR DE CARGA (CSV)
+    // 3. MÉTODOS AUXILIARES DE CARGA (CSV)
     // =========================================================================
 
-    // Monta o conteúdo do CSV a ser enviado
     private static String montarCsvAlertas(List<Alerta> listaAlertas) {
         StringBuilder sb = new StringBuilder();
-        // Cabeçalho do CSV
         sb.append("dt_hora;valor_coletado_%;componente;gravidade;macAdress;identificacao_mainframe\n");
-
         for (Alerta alerta : listaAlertas) {
-            // Utiliza o toString() da classe Alerta para formatar a linha do CSV
             sb.append(alerta.toString()).append("\n");
         }
-
         return sb.toString();
+    }
+
+    private static List<String[]> lerArquivoCsvLocal(String nomeArquivo) throws IOException {
+        List<String[]> linhas = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(new FileReader(nomeArquivo))) {
+            String linha;
+            boolean primeiraLinha = true;
+            while ((linha = reader.readLine()) != null) {
+                if (primeiraLinha) {
+                    primeiraLinha = false;
+                    continue;
+                }
+                linhas.add(linha.split(";"));
+            }
+        }
+        return linhas;
     }
 }

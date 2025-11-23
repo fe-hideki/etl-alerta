@@ -1,91 +1,94 @@
 package sptech.school;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.Base64;
+import java.nio.charset.StandardCharsets;
 import io.github.cdimascio.dotenv.Dotenv;
 
-
 public class IntegracaoJira {
-    public static void main(String[] args) throws IOException {
-        String summary="teste";
-        String description="descicao";
+
+    // Método principal que será chamado por outras classes
+    public static void abrirChamado(String summary, String description) throws IOException {
         Dotenv dotenv = Dotenv.load();
-        String jiraUrl = dotenv.get("JIRA_URL");
+        String jiraBaseUrl = dotenv.get("JIRA_URL"); // Ex: https://sua-empresa.atlassian.net
         String email = dotenv.get("JIRA_EMAIL");
         String apiToken = dotenv.get("API_JIRA");
 
-        String auth = Base64.getEncoder().encodeToString((email + ":" + apiToken).getBytes());
+        if (jiraBaseUrl == null || email == null || apiToken == null) {
+            System.err.println("❌ Erro: Variáveis de ambiente do Jira (JIRA_URL, JIRA_EMAIL, API_JIRA) não configuradas.");
+            return;
+        }
 
+        // Remove barra final se houver para evitar duplicidade
+        if (jiraBaseUrl.endsWith("/")) {
+            jiraBaseUrl = jiraBaseUrl.substring(0, jiraBaseUrl.length() - 1);
+        }
+
+        // Endpoint específico para criar chamados no Jira Service Management
+        String apiUrl = jiraBaseUrl + "/rest/servicedeskapi/request";
+
+        String auth = Base64.getEncoder().encodeToString((email + ":" + apiToken).getBytes(StandardCharsets.UTF_8));
+
+        // TRATAMENTO DE STRING PARA JSON
+        // É CRUCIAL escapar quebras de linha e aspas para não quebrar o JSON
+        String safeSummary = summary.replace("\"", "\\\"");
+        String safeDescription = description.replace("\"", "\\\"").replace("\n", "\\n");
+
+        // ATENÇÃO: Verifique se 'serviceDeskId' e 'requestTypeId' são realmente "2" no seu Jira.
+        // Se falhar com erro 400 ou 404, esses IDs estão errados.
         String json = "{"
                 + "\"serviceDeskId\": \"2\","
                 + "\"requestTypeId\": \"2\","
                 + "\"requestFieldValues\": {"
-                + "\"summary\": \"" + summary + "\","
-                + "\"description\": \"" + description + "\""
+                + "\"summary\": \"" + safeSummary + "\","
+                + "\"description\": \"" + safeDescription + "\""
                 + "}"
                 + "}";
 
-        URL url = new URL(jiraUrl);
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Authorization", "Basic " + auth);
-        conn.setRequestProperty("Accept", "application/json");
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setDoOutput(true);
+        URL url = new URL(apiUrl);
+        HttpURLConnection con = (HttpURLConnection) url.openConnection();
+        con.setRequestMethod("POST");
+        con.setRequestProperty("Authorization", "Basic " + auth);
+        con.setRequestProperty("Accept", "application/json");
+        con.setRequestProperty("Content-Type", "application/json");
+        con.setDoOutput(true);
 
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(json.getBytes());
+        try (OutputStream os = con.getOutputStream()) {
+            byte[] input = json.getBytes(StandardCharsets.UTF_8);
+            os.write(input, 0, input.length);
         }
 
-        if (conn.getResponseCode() != 201) {
-            System.out.println("Erro ao criar chamado: " + conn.getResponseCode());
+        int responseCode = con.getResponseCode();
+
+        if (responseCode == 201) {
+            System.out.println("✅ Chamado no Jira aberto com sucesso! Título: " + summary);
+        } else {
+            System.err.println("❌ Erro ao criar chamado no Jira. Código: " + responseCode);
+            System.err.println("URL Tentada: " + apiUrl);
+
+            // Ler o erro detalhado do Jira
+            try (BufferedReader br = new BufferedReader(new InputStreamReader(con.getErrorStream(), StandardCharsets.UTF_8))) {
+                StringBuilder response = new StringBuilder();
+                String line;
+                while ((line = br.readLine()) != null) {
+                    response.append(line.trim());
+                }
+                System.err.println("Detalhes do erro Jira: " + response.toString());
+            } catch (Exception e) {
+                System.err.println("Não foi possível ler os detalhes do erro.");
+            }
         }
     }
 
-    public static boolean chamadoaberto=false;
-    public static void abrirChamado(String summary, String description) throws IOException {
-
-            if (!chamadoaberto){
-
-            System.out.println("chamado aberto");
-            Dotenv dotenv = Dotenv.load();
-            String jiraUrl = dotenv.get("JIRA_URL");
-            String email = dotenv.get("JIRA_EMAIL");
-            String apiToken = dotenv.get("API_JIRA");
-        System.out.println(description);
-        System.out.println(summary);
-
-            String auth = Base64.getEncoder().encodeToString((email + ":" + apiToken).getBytes());
-
-            String json = "{"
-                    + "\"serviceDeskId\": \"2\","
-                    + "\"requestTypeId\": \"2\","
-                    + "\"requestFieldValues\": {"
-                    + "\"summary\": \"" + summary + "\","
-                    + "\"description\": \"" + description + "\""
-                    + "}"
-                    + "}";
-
-            URL url = new URL(jiraUrl);
-            HttpURLConnection con = (HttpURLConnection) url.openConnection();
-            con.setRequestMethod("POST");
-            con.setRequestProperty("Authorization", "Basic " + auth);
-            con.setRequestProperty("Accept", "application/json");
-            con.setRequestProperty("Content-Type", "application/json");
-            con.setDoOutput(true);
-
-            try (OutputStream os = con.getOutputStream()) {
-                os.write(json.getBytes());
-            }
-
-            if (con.getResponseCode() != 201) {
-                System.out.println("Erro ao criar chamado: " + con.getResponseCode());
-            }
-
-            chamadoaberto=true;
-        }
+    // Método main para teste rápido isolado
+    public static void main(String[] args) throws IOException {
+        System.out.println("--- Teste Manual Jira ---");
+        // Testando com quebra de linha para garantir que o fix funcionou
+        abrirChamado("Teste de Alerta Java", "Este é um teste.\nNova linha aqui.\nFim.");
     }
 }
