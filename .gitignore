@@ -27,15 +27,3 @@ bin/
 
 ### Mac OS ###
 .DS_Store
-
-# Diretórios de compilação do Maven/IntelliJ
-target/
-
-# Arquivos de credenciais/segredos
-.env
-src/main/resources/.env
-
-# Outros arquivos temporários ou de IDE
-*.log
-*.iml
-.idea/

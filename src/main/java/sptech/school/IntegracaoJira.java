@@ -1,18 +1,19 @@
 package sptech.school;
 
+import io.github.cdimascio.dotenv.Dotenv;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.Base64;
 import java.nio.charset.StandardCharsets;
-import io.github.cdimascio.dotenv.Dotenv;
+import java.util.Base64;
 
 public class IntegracaoJira {
 
-    // Método principal que será chamado por outras classes
+    // Abrir chamado
     public static void abrirChamado(String summary, String description) throws IOException {
         Dotenv dotenv = Dotenv.load();
         String jiraBaseUrl = dotenv.get("JIRA_URL"); // Ex: https://sua-empresa.atlassian.net
@@ -34,13 +35,10 @@ public class IntegracaoJira {
 
         String auth = Base64.getEncoder().encodeToString((email + ":" + apiToken).getBytes(StandardCharsets.UTF_8));
 
-        // TRATAMENTO DE STRING PARA JSON
-        // É CRUCIAL escapar quebras de linha e aspas para não quebrar o JSON
+        // Tratar string para json
         String safeSummary = summary.replace("\"", "\\\"");
         String safeDescription = description.replace("\"", "\\\"").replace("\n", "\\n");
 
-        // ATENÇÃO: Verifique se 'serviceDeskId' e 'requestTypeId' são realmente "2" no seu Jira.
-        // Se falhar com erro 400 ou 404, esses IDs estão errados.
         String json = "{"
                 + "\"serviceDeskId\": \"2\","
                 + "\"requestTypeId\": \"2\","
@@ -85,10 +83,9 @@ public class IntegracaoJira {
         }
     }
 
-    // Método main para teste rápido isolado
+    // Teste
     public static void main(String[] args) throws IOException {
         System.out.println("--- Teste Manual Jira ---");
-        // Testando com quebra de linha para garantir que o fix funcionou
         abrirChamado("Teste de Alerta Java", "Este é um teste.\nNova linha aqui.\nFim.");
     }
 }

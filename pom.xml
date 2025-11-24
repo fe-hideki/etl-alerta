@@ -14,6 +14,12 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
+    <dependency>
+        <groupId>com.opencsv</groupId>
+        <artifactId>opencsv</artifactId>
+        <version>5.9</version>
+    </dependency>
+
     <repositories>
         <repository>
             <id>central</id>

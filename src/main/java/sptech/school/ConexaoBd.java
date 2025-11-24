@@ -1,52 +1,142 @@
 package sptech.school;
 
 import io.github.cdimascio.dotenv.Dotenv;
+import org.jetbrains.annotations.NotNull;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+
 import java.io.IOException;
 import java.sql.*;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-
-// Importação da integração Jira
 import static sptech.school.IntegracaoJira.abrirChamado;
+
 
 public class ConexaoBd {
 
-
-    // ==========================================
-    // MÉTODO MAIN APENAS PARA TESTE DE CONEXÃO
-    // ==========================================
     public static void main(String[] args) {
-        System.out.println("--- Testando Conexão com Banco de Dados ---");
+        Dotenv dotenv = Dotenv.load();
 
-        try (Connection conn = getConnection()) {
-            System.out.println("✅ Conexão estabelecida com sucesso!");
+        String url = dotenv.get("DB_URL");
+        String user = dotenv.get("DB_USER");
+        String password = dotenv.get("DB_PASSWORD");
 
-            // Teste de busca de limites (Troque pelo MAC de um mainframe que existe no seu banco)
-            String macTeste = "166250251803552"; // Exemplo do seu script (Z15)
-            System.out.println("Buscando métricas para o MAC: " + macTeste);
+        try (Connection conn = DriverManager.getConnection(url, user, password)) {
+            System.out.println("Conexão estabelecida com sucesso! \n");
+        } catch (SQLException e) {
+            System.err.println("Erro na conexão: " + e.getMessage());
+        }
 
-            Map<String, Double[]> limites = buscarLimitesMetricas(conn, macTeste);
 
-            if (limites.isEmpty()) {
-                System.out.println("⚠️ Nenhuma métrica encontrada. Verifique se o MAC está correto e se há métricas 'Uso' cadastradas.");
-            } else {
-                for (Map.Entry<String, Double[]> entry : limites.entrySet()) {
-                    System.out.printf("   Componente: %s | Min: %.2f | Max: %.2f%n",
-                            entry.getKey(), entry.getValue()[0], entry.getValue()[1]);
-                }
-            }
+        try (Connection conn = DriverManager.getConnection(
+                Dotenv.load().get("DB_URL"),
+                Dotenv.load().get("DB_USER"),
+                Dotenv.load().get("DB_PASSWORD"))) {
+
+            List dadosDb = ConexaoBd.buscarMainFrame(conn,1);
+
 
         } catch (SQLException e) {
-            System.err.println("❌ Falha na conexão: " + e.getMessage());
+            System.err.println("Erro ao conectar no banco: " + e.getMessage());
         }
     }
 
-    // Mapeamento de Gravidade conforme seus INSERTS (Tabela gravidade)
+    // Busca métricas configuradas para um mainframe
+    public static List<Object> buscarMetricas(Connection conn, String macAdress) throws SQLException {
+        String sql = """
+                SELECT TIMESTAMPDIFF(MINUTE, al.dt_hora, NOW()) AS dif_ultimo_alerta,
+                                    (SELECT COUNT(*)
+                                        FROM alerta al2
+                                        JOIN metrica mt2 ON mt2.id = al2.fkMetrica
+                                        JOIN mainframe m2 ON m2.id = mt2.fkMainframe
+                                        WHERE m2.macAdress = m.macAdress
+                                          AND TIMESTAMPDIFF(HOUR, al2.dt_hora, NOW()) < 24
+                                    ) AS incidentes_ultimas_24, m.fabricante, m.modelo
+                                FROM mainframe AS m
+                                JOIN metrica AS mt ON m.id = mt.fkMainframe
+                                JOIN alerta AS al ON mt.id = al.fkMetrica
+                                WHERE m.macAdress = ?
+                                ORDER BY al.dt_hora DESC
+                                LIMIT 1;
+        """;
+
+        List lista = new ArrayList<>();
+
+        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, macAdress);
+            ResultSet rs = stmt.executeQuery();
+
+            if (rs.next()) {
+                lista.add(rs.getString("dif_ultimo_alerta"));
+                lista.add(rs.getString("incidentes_ultimas_24"));
+                lista.add(rs.getString("fabricante"));
+                lista.add(rs.getString("modelo"));
+            }
+        }
+        return lista;
+    }
+   // busca todos mainframes
+
+    public static List<Object> buscarMainFrame(Connection conn, Integer id) throws SQLException {
+        String sql = """
+            select m.macAdress from empresa e\s
+                    join setor s  on e.id = s.fkempresa
+                    join mainframe m on s.id = m.fksetor
+                    where e.id = ? ;
+                
+        """;
+
+        List lista = new ArrayList<>();
+
+        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setLong(1, id);
+            ResultSet rs = stmt.executeQuery();
+
+            // next pega prox linha
+            while (rs.next()) {
+                lista.add(rs.getString("macAdress"));
+            }
+
+            System.out.println(lista);
+        }
+        return lista;
+    }
+    // busca todos mainframes
+// Dentro da classe ConexaoAws
+
+    public static List<String> buscarMac(Connection conn, String empresa) throws SQLException {
+        String sql = """
+            SELECT m.macAdress 
+            FROM empresa e
+            JOIN setor s ON s.fkempresa = e.id
+            JOIN mainframe m ON m.fksetor = s.id
+            WHERE e.id = ?;
+        """;
+
+        List<String> lista = new ArrayList<>();
+
+        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, empresa);
+            ResultSet rs = stmt.executeQuery();
+
+            while (rs.next()) {
+                lista.add(rs.getString("macAdress"));
+            }
+        }
+
+        return lista;
+    }
+
+    // ------------------------------------------------------------------------------------------------------------------
+    // ETL ALERTAS
+    // ------------------------------------------------------------------------------------------------------------------
+
+    // Mapeamento de gravidade
     private static final Map<String, Integer> MAP_GRAVIDADE_FK = new HashMap<>();
     static {
-        // 1=Emergência, 2=Muito Urgente, 3=Urgente, 4=Normal
         MAP_GRAVIDADE_FK.put("Emergencia", 1);
-        MAP_GRAVIDADE_FK.put("Emergência", 1); // Caso venha com acento
+        MAP_GRAVIDADE_FK.put("Emergência", 1); // caso venha com acento
         MAP_GRAVIDADE_FK.put("Muito Urgente", 2);
         MAP_GRAVIDADE_FK.put("Urgente", 3);
         MAP_GRAVIDADE_FK.put("Normal", 4);
@@ -60,21 +150,15 @@ public class ConexaoBd {
         return DriverManager.getConnection(url, user, password);
     }
 
-    /**
-     * Busca os limites MIN e MAX configurados na tabela metrica.
-     * Retorna um Map onde a Chave é o nome do componente (ex: 'Processador')
-     * e o Valor é um array [min, max].
-     */
+    // Busca os limites MIN e MAX configurados na tabela metrica
     public static Map<String, Double[]> buscarLimitesMetricas(Connection conn, String macAdress) throws SQLException {
-        // SQL ajustado para suas tabelas: metrica -> componente -> mainframe
         String sql = """
             SELECT c.nome, m.min, m.max
             FROM metrica m
             JOIN componente c ON m.fkComponente = c.id
             JOIN mainframe mf ON m.fkMainframe = mf.id
-            WHERE mf.macAdress = ? AND m.fkTipo = 1
-        """;
-        // Obs: fkTipo = 1 refere-se a 'Uso' conforme seu script
+            WHERE mf.macAdress = ? AND m.fkTipo = 1 
+        """;//  fkTipo = 1 refere-se a 'Uso'
 
         Map<String, Double[]> limites = new HashMap<>();
 
@@ -93,25 +177,39 @@ public class ConexaoBd {
         return limites;
     }
 
-    /**
-     * Insere o alerta na tabela 'alerta' descobrindo o fkMetrica dinamicamente.
-     */
+    private static String formatarDataSql(String dtHora) {
+        try {
+            // Divide em data e hora
+            String[] partes = dtHora.split(" ");
+            String data = partes[0]; // Ex: 21/11/2025
+            String hora = partes[1]; // Ex: 12:45
+
+            // Divide a data (DD, MM, YYYY)
+            String[] dataPartes = data.split("/");
+            String dia = dataPartes[0];
+            String mes = dataPartes[1];
+            String ano = dataPartes[2];
+
+            // Reconstrói no formato YYYY-MM-DD HH:MM:SS
+            return String.format("%s-%s-%s %s:00", ano, mes, dia, hora);
+        } catch (Exception e) {
+            System.err.println("Erro ao formatar data '" + dtHora + "'. Usando valor original.");
+            return dtHora;
+        }
+    }
+
+    // Insere o alerta na tabela alerta e descobre o fkMetrica
     public static void inserirAlerta(Connection conn,
                                      String dtHora, String nomeComponente, Double valorColetado,
                                      String macAdress, String identificacaoMainframe, String gravidade) {
 
-        // 1. Descobrir o ID da gravidade
-        // Remove acentos e ajusta casing se necessário para garantir o match
+        // Descobrir o ID da gravidade
         String gravidadeChave = gravidade;
         if(gravidade.equalsIgnoreCase("Emergência")) gravidadeChave = "Emergencia";
 
-        Integer fkGravidade = MAP_GRAVIDADE_FK.getOrDefault(gravidadeChave, 4); // Default 4 (Normal)
-
-        // Se for Normal (4), a lógica de negócio geralmente não insere alerta ou insere apenas log
+        Integer fkGravidade = MAP_GRAVIDADE_FK.getOrDefault(gravidadeChave, 4);
         if (fkGravidade == 4) return;
 
-        // 2. SQL de Inserção
-        // Precisamos sub-selecionar o ID da métrica baseado no MacAdress e Nome do Componente
         String sql = """
             INSERT INTO alerta (dt_hora, valor_coletado, fkGravidade, fkStatus, fkMetrica)
             VALUES (?, ?, ?, 1, (
@@ -122,19 +220,14 @@ public class ConexaoBd {
                 WHERE mf.macAdress = ? AND c.nome = ? AND m.fkTipo = 1
                 LIMIT 1
             ));
-        """;
-        // Obs: fkStatus 1 = 'Aberto' conforme seu insert de exemplo
+        """;// fkStatus 1 = 'Aberto'
 
         try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-            // Formatar Data: O Java String vem como ISO, o MySQL DATETIME aceita "YYYY-MM-DD HH:MM:SS"
-            // Se o dtHora vier com "T" (ex: 2023-10-25T10:00:00), substituímos por espaço.
-            stmt.setString(1, dtHora.replace("T", " "));
+            // Formatar Data: AGORA USA A FUNÇÃO DE CONVERSÃO
+            stmt.setString(1, formatarDataSql(dtHora));
             stmt.setDouble(2, valorColetado);
             stmt.setInt(3, fkGravidade);
             stmt.setString(4, macAdress);
-
-            // ATENÇÃO: O nome do componente deve ser igual ao do banco ('Processador', 'Memória RAM', 'Disco Rígido')
-            // Se o seu CSV traz "CPU", precisa converter para "Processador" antes de mandar pra cá ou garantir que o CSV venha certo.
             stmt.setString(5, nomeComponente);
 
             int linhasAfetadas = stmt.executeUpdate();
@@ -143,7 +236,7 @@ public class ConexaoBd {
                 System.out.printf("✅ Alerta %s inserido no BD para %s | Componente: %s | Valor: %.2f%%%n",
                         gravidade, identificacaoMainframe, nomeComponente, valorColetado);
 
-                // 3. Integração com Jira (Somente se for crítico)
+                // Integração com Jira
                 if (fkGravidade <= 3) {
                     String summary = String.format("ALERTA %s: %s em %s", gravidade.toUpperCase(), nomeComponente, identificacaoMainframe);
                     String description = String.format(
